@@ -120,7 +120,6 @@
         .status {
             margin-top: 20px;
             padding: 12px;
-            background: #f8f9fa;
             border-radius: 16px;
             font-family: monospace;
             font-size: 0.85rem;
@@ -129,9 +128,22 @@
             max-height: 400px;
             overflow: auto;
         }
-        .error { color: #d32f2f; background: #ffebee; }
-        .success { color: #2e7d32; background: #e8f5e9; }
-        .info { color: #0d47a1; background: #e3f2fd; }
+        /* 绿色风格状态栏 */
+        .info {
+            background: #e8f5e9;
+            color: #1e5e3f;
+            border-left: 4px solid #2f5e4c;
+        }
+        .success {
+            background: #c8e6c9;
+            color: #1b5e20;
+            border-left: 4px solid #2f5e4c;
+        }
+        .error {
+            background: #ffe0e0;
+            color: #b71c1c;
+            border-left: 4px solid #d32f2f;
+        }
         .download-link {
             display: inline-block;
             margin-top: 12px;
@@ -211,7 +223,7 @@
         zh: {
             toggleBtn: "English",
             extractTitle: "从 .mcworld 提取结构模板",
-            extractDesc: "支持嵌套文件夹（iOS 手动压缩）自动修复，提取所有 structuretemplate_mystructure: 开头的结构。",
+            extractDesc: "提取所有 structuretemplate_mystructure: 开头的结构。",
             extractFileLabel: "选择世界存档 (.mcworld/.zip)",
             injectTitle: "将结构植入世界",
             injectDesc: "将 .mcstructure 文件打包为行为包，植入世界中，生成新的世界文件。",
@@ -248,7 +260,7 @@
         en: {
             toggleBtn: "中文",
             extractTitle: "Extract Structure Templates from .mcworld",
-            extractDesc: "Automatically fixes nested folders (iOS manual compression) and extracts all structures with the prefix 'structuretemplate_mystructure:'.",
+            extractDesc: "Extracts all structures with the prefix 'structuretemplate_mystructure:'.",
             extractFileLabel: "Select World File (.mcworld/.zip)",
             injectTitle: "Inject Structures into World",
             injectDesc: "Pack .mcstructure files into a behavior pack and inject them into the world, generating a new world file.",
