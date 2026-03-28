@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <title>MCBE结构提取器 - 中文支持</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+            max-width: 800px;
+            margin: 20px auto;
+            padding: 20px;
+            background: #f0f2f5;
+        }
+        .card {
+            background: white;
+            border-radius: 20px;
+            padding: 24px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        h1 {
+            font-size: 1.5rem;
+            margin-top: 0;
+            color: #1e3a3f;
+        }
+        input, button {
+            font-size: 16px;
+            margin: 10px 0;
+            padding: 10px 16px;
+            border-radius: 30px;
+            border: 1px solid #ccc;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        button {
+            background: #2f5e4c;
+            color: white;
+            font-weight: bold;
+            border: none;
+            cursor: pointer;
+        }
+        button:disabled {
+            background: #aaa;
+            cursor: not-allowed;
+        }
+        #status {
+            margin-top: 20px;
+            padding: 12px;
+            background: #f8f9fa;
+            border-radius: 16px;
+            font-family: monospace;
+            font-size: 0.85rem;
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 500px;
+            overflow: auto;
+        }
+        .error { color: #d32f2f; background: #ffebee; }
+        .success { color: #2e7d32; background: #e8f5e9; }
+        .info { color: #0d47a1; background: #e3f2fd; }
+        .download-link {
+            display: inline-block;
+            margin-top: 12px;
+            padding: 8px 16px;
+            background: #3f7a62;
+            color: white;
+            text-decoration: none;
+            border-radius: 30px;
+            font-size: 0.9rem;
+        }
+        .small-note {
+            font-size: 0.75rem;
+            color: #666;
+            margin-top: 8px;
+        }
+    </style>
+</head>
+<body>
+<div class="card">
+    <h1>📦 从 .mcworld 提取结构模板</h1>
+    <p>支持嵌套文件夹（iOS 手动压缩）自动修复，提取所有 <code>structuretemplate_mystructure:</code> 开头的结构，保留中文名称。</p>
+    <input type="file" id="fileInput" accept=".mcworld,.zip,application/zip,application/x-mcworld">
+    <button id="extractBtn" disabled>🚀 提取并下载</button>
+    <div id="status"></div>
+    <div class="small-note">💡 如果自动下载未开始，请点击下方的“手动下载”链接。</div>
+</div>
+
+<script type="module">
+    import { readMcworld } from "https://esm.sh/mcbe-leveldb-reader";
+    import JSZip from "https://esm.sh/jszip";
+
+    const fileInput = document.getElementById('fileInput');
+    const extractBtn = document.getElementById('extractBtn');
+    const statusDiv = document.getElementById('status');
+
+    let selectedFile = null;
+
+    fileInput.addEventListener('change', (e) => {
+        selectedFile = e.target.files[0];
+        extractBtn.disabled = !selectedFile;
+        statusDiv.innerHTML = '';
+    });
+
+    // 辅助：将 ZIP 中的嵌套目录扁平化（将公共前缀去掉）
+    async function flattenZip(originalBlob) {
+        const zip = new JSZip();
+        const originalZip = await zip.loadAsync(originalBlob);
+        const allEntries = Object.keys(originalZip.files);
+        const fileEntries = allEntries.filter(name => {
+            if (name.endsWith('/')) return false;
+            if (name.startsWith('__MACOSX/')) return false;
+            return true;
+        });
+        if (fileEntries.length === 0) return originalBlob;
+
+        let commonPrefix = null;
+        for (const name of fileEntries) {
+            const lastSlash = name.lastIndexOf('/');
+            const prefix = lastSlash === -1 ? '' : name.substring(0, lastSlash + 1);
+            if (commonPrefix === null) {
+                commonPrefix = prefix;
+            } else {
+                while (!name.startsWith(commonPrefix) && commonPrefix.length > 0) {
+                    const lastSlash = commonPrefix.lastIndexOf('/', commonPrefix.length - 2);
+                    commonPrefix = lastSlash === -1 ? '' : commonPrefix.substring(0, lastSlash + 1);
+                }
+                if (commonPrefix === '') break;
+            }
+        }
+        if (!commonPrefix || commonPrefix === '') return originalBlob;
+
+        const newZip = new JSZip();
+        let added = 0;
+        for (const name of fileEntries) {
+            if (!name.startsWith(commonPrefix)) continue;
+            const newName = name.substring(commonPrefix.length);
+            if (newName === '') continue;
+            const fileObj = originalZip.files[name];
+            if (!fileObj) continue;
+            const data = await fileObj.async('uint8array');
+            newZip.file(newName, data);
+            added++;
+        }
+        if (added === 0) return originalBlob;
+        const newBlob = await newZip.generateAsync({ type: "blob", compression: "DEFLATE" });
+        return newBlob;
+    }
+
+    // 辅助：将值转换为 Uint8Array
+    async function valueToUint8Array(value) {
+        if (value instanceof Uint8Array) return value;
+        if (value instanceof ArrayBuffer) return new Uint8Array(value);
+        if (typeof value === 'string') return new TextEncoder().encode(value);
+        if (value instanceof Blob) return new Uint8Array(await value.arrayBuffer());
+        console.warn('未知值类型，将尝试序列化为 JSON', typeof value);
+        return new TextEncoder().encode(JSON.stringify(value));
+    }
+
+    // 辅助：将键转换为字符串（优先使用 UTF-8 解码，处理 Latin-1 误编码）
+    function keyToString(key) {
+        if (typeof key === 'string') {
+            // 可能是 Latin-1 编码的字符串，尝试恢复为 UTF-8
+            try {
+                const bytes = new Uint8Array(key.length);
+                for (let i = 0; i < key.length; i++) {
+                    bytes[i] = key.charCodeAt(i) & 0xFF;
+                }
+                const decoded = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+                // 如果解码后包含中文或非 ASCII，则使用解码结果
+                if (/[\u4e00-\u9fa5]/.test(decoded) || decoded !== key) {
+                    return decoded;
+                }
+            } catch (e) {
+                // 忽略，使用原字符串
+            }
+            return key;
+        }
+        if (key instanceof Uint8Array) {
+            try {
+                return new TextDecoder('utf-8', { fatal: false }).decode(key);
+            } catch (e) {
+                return `[Binary: ${Array.from(key.slice(0, 32)).map(b => b.toString(16).padStart(2,'0')).join(' ')}...]`;
+            }
+        }
+        if (key instanceof ArrayBuffer) {
+            return keyToString(new Uint8Array(key));
+        }
+        return String(key);
+    }
+
+    extractBtn.addEventListener('click', async () => {
+        if (!selectedFile) return;
+
+        extractBtn.disabled = true;
+        statusDiv.innerHTML = '⏳ 正在处理文件，请稍候...<br>';
+        statusDiv.className = 'info';
+
+        try {
+            // 1. 自动扁平化嵌套目录
+            statusDiv.innerHTML += '🔧 检查并修复嵌套目录...<br>';
+            const normalizedBlob = await flattenZip(selectedFile);
+
+            // 2. 解析 LevelDB
+            statusDiv.innerHTML += '📖 正在解析 LevelDB 数据库...<br>';
+            const levelDb = await readMcworld(normalizedBlob);
+
+            // 3. 遍历所有键值对
+            let entries = [];
+            if (levelDb && typeof levelDb.entries === 'function') {
+                for await (const [key, value] of levelDb.entries()) {
+                    entries.push({ key, value });
+                }
+            } else if (levelDb && typeof levelDb === 'object') {
+                for (const key in levelDb) {
+                    entries.push({ key, value: levelDb[key] });
+                }
+            } else {
+                throw new Error('无法获取 LevelDB 中的数据，请检查文件格式。');
+            }
+
+            statusDiv.innerHTML += `📋 共读取到 ${entries.length} 个键值对。<br>`;
+
+            // 4. 筛选目标前缀
+            const targetPrefix = 'structuretemplate_mystructure:';
+            const structures = [];
+
+            for (const { key, value } of entries) {
+                const keyStr = keyToString(key);
+                if (keyStr.startsWith(targetPrefix)) {
+                    structures.push({ key: keyStr, value });
+                    const structName = keyStr.slice(targetPrefix.length);
+                    statusDiv.innerHTML += `✓ 找到结构：${structName}<br>`;
+                }
+            }
+
+            if (structures.length === 0) {
+                throw new Error(`未找到任何以 "${targetPrefix}" 开头的键。请确认您保存的结构名称包含 "mystructure:" 前缀（例如 /structure save mystructure:建筑名）。`);
+            }
+
+            statusDiv.innerHTML += `<br>✅ 共找到 ${structures.length} 个结构，正在打包...<br>`;
+
+            // 5. 打包为 ZIP
+            const zip = new JSZip();
+            for (const { key, value } of structures) {
+                let name = key.slice(targetPrefix.length);
+                // 移除文件系统不允许的字符，保留中文、空格等
+                name = name.replace(/[\\/:*?"<>|]/g, '_');
+                const fileName = `${name}.mcstructure`;
+                const binaryData = await valueToUint8Array(value);
+                zip.file(fileName, binaryData);
+            }
+            const zipBlob = await zip.generateAsync({ type: 'blob' });
+
+            // 6. 下载
+            const url = URL.createObjectURL(zipBlob);
+            // 尝试自动下载
+            const autoLink = document.createElement('a');
+            autoLink.href = url;
+            autoLink.download = 'structures.zip';
+            document.body.appendChild(autoLink);
+            autoLink.click();
+            document.body.removeChild(autoLink);
+            setTimeout(() => URL.revokeObjectURL(url), 10000);
+
+            // 提供手动下载链接
+            const downloadLink = document.createElement('a');
+            downloadLink.href = url;
+            downloadLink.download = 'structures.zip';
+            downloadLink.textContent = '📥 如果未自动下载，请点击此处手动下载 structures.zip';
+            downloadLink.className = 'download-link';
+            statusDiv.appendChild(document.createElement('br'));
+            statusDiv.appendChild(downloadLink);
+
+            statusDiv.innerHTML += `<br>🎉 提取成功！共 ${structures.length} 个结构。`;
+            statusDiv.className = 'success';
+        } catch (err) {
+            console.error(err);
+            statusDiv.innerHTML += `<br>❌ 提取失败：${err.message}`;
+            statusDiv.className = 'error';
+        } finally {
+            extractBtn.disabled = false;
+        }
+    });
+</script>
+</body>
+</html>
