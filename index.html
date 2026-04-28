@@ -218,6 +218,98 @@
     import { readMcworld } from "https://esm.sh/mcbe-leveldb-reader";
     import JSZip from "https://esm.sh/jszip";
 
+    // ---------- 配置和常量 ----------
+    const CONFIG = {
+        files: {
+            sizeLimit: 500 * 1024 * 1024, // 500MB
+            validExtensions: ['.mcworld', '.zip', '.mcstructure'],
+            urlRevokeTimeout: 10000
+        },
+        structures: {
+            prefix: 'structuretemplate_mystructure:'
+        },
+        packs: {
+            folder: 'imported_structures_pack',
+            name: 'Imported Structures',
+            dir: 'db/'
+        },
+        api: {
+            timeout: 2000
+        }
+    };
+
+    // ---------- 工具函数 ----------
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    function validateFile(file, acceptedExtensions) {
+        // Check file size
+        if (file.size > CONFIG.files.sizeLimit) {
+            const sizeMB = (file.size / 1024 / 1024).toFixed(2);
+            const limitMB = (CONFIG.files.sizeLimit / 1024 / 1024).toFixed(0);
+            const errorEn = `File too large (${sizeMB}MB). Maximum allowed: ${limitMB}MB`;
+            const errorZh = `文件过大 (${sizeMB}MB)。最大限制: ${limitMB}MB`;
+            return {
+                valid: false,
+                error: currentLang === 'zh' ? errorZh : errorEn
+            };
+        }
+
+        // Check file extension
+        const fileName = file.name.toLowerCase();
+        const hasValidExt = acceptedExtensions.some(ext => fileName.endsWith(ext));
+        if (!hasValidExt) {
+            const extsStr = acceptedExtensions.join(', ');
+            const errorEn = `Unsupported file format. Accepted formats: ${extsStr}`;
+            const errorZh = `不支持的文件格式。支持的格式: ${extsStr}`;
+            return {
+                valid: false,
+                error: currentLang === 'zh' ? errorZh : errorEn
+            };
+        }
+
+        return { valid: true };
+    }
+
+    function appendStatusMessage(element, message, className = '') {
+        const line = document.createElement('div');
+        line.textContent = message;
+        element.appendChild(line);
+        if (className && !element.className.includes(className)) {
+            element.className = `status ${className}`;
+        }
+    }
+
+    function clearStatus(element) {
+        element.innerHTML = '';
+        element.className = 'status';
+    }
+
+    // Display status messages safely
+    function updateStatusDisplay(element, messages) {
+        element.innerHTML = '';
+        for (const msg of messages) {
+            appendStatusMessage(element, msg);
+        }
+    }
+
+    // Schedule URL revocation with visibility detection
+    function scheduleUrlRevoke(url) {
+        const timeoutId = setTimeout(() => URL.revokeObjectURL(url), CONFIG.files.urlRevokeTimeout);
+
+        const handleVisibilityChange = () => {
+            if (document.hidden) {
+                clearTimeout(timeoutId);
+                URL.revokeObjectURL(url);
+                document.removeEventListener('visibilitychange', handleVisibilityChange);
+            }
+        };
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
+
     // ---------- 多语言资源 ----------
     const translations = {
         zh: {
@@ -255,7 +347,10 @@
             injectInvalidWorld: "世界文件无效或无法解压。",
             selectFile: "选择文件",
             noFileSelected: "未选择文件",
-            filesSelected: "已选择 {count} 个文件"
+            filesSelected: "已选择 {count} 个文件",
+            errorFileTooLarge: "文件过大",
+            errorInvalidFormat: "文件格式不支持",
+            errorSelectValidFiles: "请选择有效的文件"
         },
         en: {
             toggleBtn: "中文",
@@ -292,22 +387,32 @@
             injectInvalidWorld: "Invalid world file or cannot be unzipped.",
             selectFile: "Select File",
             noFileSelected: "No file selected",
-            filesSelected: "{count} files selected"
+            filesSelected: "{count} files selected",
+            errorFileTooLarge: "File too large",
+            errorInvalidFormat: "Unsupported file format",
+            errorSelectValidFiles: "Please select valid files"
         }
     };
 
     let currentLang = 'zh';
     let i18n = translations.zh;
+    let isProcessing = false;  // Prevent concurrent operations
 
-    // 检测IP语言
+    // 检测IP语言 (with timeout)
     async function detectLanguageByIP() {
         try {
-            const response = await fetch('https://ipapi.co/json/');
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), CONFIG.api.timeout);
+
+            const response = await fetch('https://ipapi.co/json/', { signal: controller.signal });
+            clearTimeout(timeoutId);
+
             const data = await response.json();
             const country = data.country_code;
             if (['CN', 'TW', 'HK', 'MO'].includes(country)) return 'zh';
             return 'en';
         } catch (err) {
+            // Silently fall back to browser language
             const browserLang = navigator.language || navigator.userLanguage;
             return browserLang.startsWith('zh') ? 'zh' : 'en';
         }
@@ -379,6 +484,14 @@
         }
     }
 
+    function formatFileSize(bytes) {
+        if (bytes === 0) return '0 Bytes';
+        const k = 1024;
+        const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+    }
+
     // ---------- 提取结构功能 ----------
     const extractFileInput = document.getElementById('extractFile');
     const extractFileBtn = document.getElementById('extractFileBtn');
@@ -392,15 +505,26 @@
         extractFileInput.click();
     });
     extractFileInput.addEventListener('change', (e) => {
-        extractSelectedFile = e.target.files[0];
+        const file = e.target.files[0];
+
+        // Validate file
+        const validation = validateFile(file, ['.mcworld', '.zip']);
+        if (!validation.valid) {
+            extractStatusDiv.innerHTML = '';
+            extractStatusDiv.className = 'status error';
+            appendStatusMessage(extractStatusDiv, validation.error, 'error');
+            extractBtn.disabled = true;
+            return;
+        }
+
+        extractSelectedFile = file;
         updateExtractFileNameDisplay();
         extractBtn.disabled = !extractSelectedFile;
-        extractStatusDiv.innerHTML = '';
-        extractStatusDiv.className = 'status';
+        clearStatus(extractStatusDiv);
     });
     function updateExtractFileNameDisplay() {
         if (extractSelectedFile) {
-            extractFileNameSpan.innerText = extractSelectedFile.name;
+            extractFileNameSpan.innerText = `${extractSelectedFile.name} (${formatFileSize(extractSelectedFile.size)})`;
         } else {
             extractFileNameSpan.innerText = i18n.noFileSelected;
         }
@@ -408,45 +532,51 @@
 
     // 扁平化ZIP（用于提取和注入）
     async function flattenZip(originalBlob) {
-        const zip = new JSZip();
-        const originalZip = await zip.loadAsync(originalBlob);
-        const allEntries = Object.keys(originalZip.files);
-        const fileEntries = allEntries.filter(name => {
-            if (name.endsWith('/')) return false;
-            if (name.startsWith('__MACOSX/')) return false;
-            return true;
-        });
-        if (fileEntries.length === 0) return originalBlob;
+        try {
+            const zip = new JSZip();
+            const originalZip = await zip.loadAsync(originalBlob);
+            const allEntries = Object.keys(originalZip.files);
+            const fileEntries = allEntries.filter(name => {
+                if (name.endsWith('/')) return false;
+                if (name.startsWith('__MACOSX/')) return false;
+                return true;
+            });
+            if (fileEntries.length === 0) return originalBlob;
 
-        let commonPrefix = null;
-        for (const name of fileEntries) {
-            const lastSlash = name.lastIndexOf('/');
-            const prefix = lastSlash === -1 ? '' : name.substring(0, lastSlash + 1);
-            if (commonPrefix === null) commonPrefix = prefix;
-            else {
-                while (!name.startsWith(commonPrefix) && commonPrefix.length > 0) {
-                    const lastSlash = commonPrefix.lastIndexOf('/', commonPrefix.length - 2);
-                    commonPrefix = lastSlash === -1 ? '' : commonPrefix.substring(0, lastSlash + 1);
+            let commonPrefix = null;
+            for (const name of fileEntries) {
+                const lastSlash = name.lastIndexOf('/');
+                const prefix = lastSlash === -1 ? '' : name.substring(0, lastSlash + 1);
+                if (commonPrefix === null) commonPrefix = prefix;
+                else {
+                    while (!name.startsWith(commonPrefix) && commonPrefix.length > 0) {
+                        const lastSlash = commonPrefix.lastIndexOf('/', commonPrefix.length - 2);
+                        commonPrefix = lastSlash === -1 ? '' : commonPrefix.substring(0, lastSlash + 1);
+                    }
+                    if (commonPrefix === '') break;
                 }
-                if (commonPrefix === '') break;
             }
-        }
-        if (!commonPrefix || commonPrefix === '') return originalBlob;
+            if (!commonPrefix || commonPrefix === '') return originalBlob;
 
-        const newZip = new JSZip();
-        let added = 0;
-        for (const name of fileEntries) {
-            if (!name.startsWith(commonPrefix)) continue;
-            const newName = name.substring(commonPrefix.length);
-            if (newName === '') continue;
-            const fileObj = originalZip.files[name];
-            if (!fileObj) continue;
-            const data = await fileObj.async('uint8array');
-            newZip.file(newName, data);
-            added++;
+            const newZip = new JSZip();
+            let added = 0;
+            for (const name of fileEntries) {
+                if (!name.startsWith(commonPrefix)) continue;
+                const newName = name.substring(commonPrefix.length);
+                if (newName === '') continue;
+                const fileObj = originalZip.files[name];
+                if (!fileObj) continue;
+                const data = await fileObj.async('uint8array');
+                newZip.file(newName, data);
+                added++;
+            }
+            if (added === 0) return originalBlob;
+            return await newZip.generateAsync({ type: "blob", compression: "DEFLATE" });
+        } catch (err) {
+            console.error('Error flattening ZIP:', err);
+            // Return original blob if flattening fails
+            return originalBlob;
         }
-        if (added === 0) return originalBlob;
-        return await newZip.generateAsync({ type: "blob", compression: "DEFLATE" });
     }
 
     async function valueToUint8Array(value) {
@@ -476,14 +606,23 @@
     }
 
     extractBtn.addEventListener('click', async () => {
-        if (!extractSelectedFile) return;
+        if (!extractSelectedFile || isProcessing) return;
+        isProcessing = true;
         extractBtn.disabled = true;
-        extractStatusDiv.innerHTML = i18n.statusProcessing + '<br>';
+        clearStatus(extractStatusDiv);
+        const statusMessages = [];
         extractStatusDiv.className = 'status info';
+
         try {
-            extractStatusDiv.innerHTML += i18n.statusFlatten + '<br>';
+            statusMessages.push(i18n.statusProcessing);
+            statusMessages.push(i18n.statusFlatten);
+            updateStatusDisplay(extractStatusDiv, statusMessages);
+
             const normalizedBlob = await flattenZip(extractSelectedFile);
-            extractStatusDiv.innerHTML += i18n.statusParsing + '<br>';
+
+            statusMessages.push(i18n.statusParsing);
+            updateStatusDisplay(extractStatusDiv, statusMessages);
+
             const levelDb = await readMcworld(normalizedBlob);
 
             let entries = [];
@@ -493,19 +632,23 @@
                 for (const key in levelDb) entries.push({ key, value: levelDb[key] });
             } else throw new Error('Cannot read LevelDB data.');
 
-            extractStatusDiv.innerHTML += i18n.statusEntries.replace('{count}', entries.length) + '<br>';
-            const targetPrefix = 'structuretemplate_mystructure:';
+            statusMessages.push(i18n.statusEntries.replace('{count}', entries.length));
+            updateStatusDisplay(extractStatusDiv, statusMessages);
+
+            const targetPrefix = CONFIG.structures.prefix;
             const structures = [];
             for (const { key, value } of entries) {
                 const keyStr = keyToString(key);
                 if (keyStr.startsWith(targetPrefix)) {
                     structures.push({ key: keyStr, value });
-                    extractStatusDiv.innerHTML += i18n.statusFound.replace('{name}', keyStr.slice(targetPrefix.length)) + '<br>';
+                    statusMessages.push(i18n.statusFound.replace('{name}', keyStr.slice(targetPrefix.length)));
                 }
             }
             if (structures.length === 0) throw new Error(i18n.statusNoStructures.replace('{prefix}', targetPrefix));
 
-            extractStatusDiv.innerHTML += i18n.statusPackaging.replace('{count}', structures.length) + '<br>';
+            statusMessages.push(i18n.statusPackaging.replace('{count}', structures.length));
+            updateStatusDisplay(extractStatusDiv, statusMessages);
+
             const zip = new JSZip();
             for (const { key, value } of structures) {
                 let name = key.slice(targetPrefix.length).replace(/[\\/:*?"<>|]/g, '_');
@@ -515,29 +658,36 @@
             }
             const zipBlob = await zip.generateAsync({ type: 'blob' });
             const url = URL.createObjectURL(zipBlob);
+
+            // Auto-download
             const autoLink = document.createElement('a');
             autoLink.href = url;
             autoLink.download = 'structures.zip';
             document.body.appendChild(autoLink);
             autoLink.click();
             document.body.removeChild(autoLink);
-            setTimeout(() => URL.revokeObjectURL(url), 10000);
 
+            // Schedule URL cleanup with visibility detection
+            scheduleUrlRevoke(url);
+
+            // Add manual download link
             const downloadLink = document.createElement('a');
             downloadLink.href = url;
             downloadLink.download = 'structures.zip';
             downloadLink.textContent = i18n.downloadLink;
             downloadLink.className = 'download-link';
-            extractStatusDiv.appendChild(document.createElement('br'));
+
+            statusMessages.push(i18n.statusSuccessExtract.replace('{count}', structures.length));
+            updateStatusDisplay(extractStatusDiv, statusMessages);
             extractStatusDiv.appendChild(downloadLink);
-            extractStatusDiv.innerHTML += `<br>${i18n.statusSuccessExtract.replace('{count}', structures.length)}`;
             extractStatusDiv.className = 'status success';
         } catch (err) {
-            console.error(err);
-            extractStatusDiv.innerHTML += `<br>${i18n.statusError.replace('{message}', err.message)}`;
+            statusMessages.push(i18n.statusError.replace('{message}', escapeHtml(err.message)));
+            updateStatusDisplay(extractStatusDiv, statusMessages);
             extractStatusDiv.className = 'status error';
         } finally {
             extractBtn.disabled = false;
+            isProcessing = false;
         }
     });
 
@@ -558,7 +708,21 @@
         injectWorldFileInput.click();
     });
     injectWorldFileInput.addEventListener('change', (e) => {
-        injectWorldFile = e.target.files[0];
+        const file = e.target.files[0];
+
+        // Validate file
+        if (file) {
+            const validation = validateFile(file, ['.mcworld', '.zip']);
+            if (!validation.valid) {
+                injectStatusDiv.innerHTML = '';
+                injectStatusDiv.className = 'status error';
+                appendStatusMessage(injectStatusDiv, validation.error, 'error');
+                injectBtn.disabled = true;
+                return;
+            }
+        }
+
+        injectWorldFile = file;
         updateWorldFileNameDisplay();
         updateInjectButton();
         injectStatusDiv.innerHTML = '';
@@ -566,7 +730,7 @@
     });
     function updateWorldFileNameDisplay() {
         if (injectWorldFile) {
-            worldFileNameSpan.innerText = injectWorldFile.name;
+            worldFileNameSpan.innerText = `${injectWorldFile.name} (${formatFileSize(injectWorldFile.size)})`;
         } else {
             worldFileNameSpan.innerText = i18n.noFileSelected;
         }
@@ -576,19 +740,39 @@
         injectStructureFilesInput.click();
     });
     injectStructureFilesInput.addEventListener('change', (e) => {
-        injectStructureFiles = Array.from(e.target.files);
-        updateStructureFileNameDisplay();
-        updateInjectButton();
-        injectStatusDiv.innerHTML = '';
-        injectStatusDiv.className = 'status';
+        const files = Array.from(e.target.files);
+
+        // Validate files
+        let hasError = false;
+        for (const file of files) {
+            const validation = validateFile(file, ['.mcstructure']);
+            if (!validation.valid) {
+                injectStatusDiv.innerHTML = '';
+                injectStatusDiv.className = 'status error';
+                appendStatusMessage(injectStatusDiv, validation.error, 'error');
+                injectBtn.disabled = true;
+                hasError = true;
+                break;
+            }
+        }
+
+        if (!hasError) {
+            injectStructureFiles = files;
+            updateStructureFileNameDisplay();
+            updateInjectButton();
+            injectStatusDiv.innerHTML = '';
+            injectStatusDiv.className = 'status';
+        }
     });
     function updateStructureFileNameDisplay() {
         if (injectStructureFiles.length === 0) {
             structureFileNameSpan.innerText = i18n.noFileSelected;
         } else if (injectStructureFiles.length === 1) {
-            structureFileNameSpan.innerText = injectStructureFiles[0].name;
+            const file = injectStructureFiles[0];
+            structureFileNameSpan.innerText = `${file.name} (${formatFileSize(file.size)})`;
         } else {
-            structureFileNameSpan.innerText = i18n.filesSelected.replace('{count}', injectStructureFiles.length);
+            const totalSize = injectStructureFiles.reduce((sum, f) => sum + f.size, 0);
+            structureFileNameSpan.innerText = i18n.filesSelected.replace('{count}', injectStructureFiles.length) + ` (${formatFileSize(totalSize)})`;
         }
     }
 
@@ -611,7 +795,7 @@
         const manifest = {
             format_version: 2,
             header: {
-                name: "Imported Structures",
+                name: CONFIG.packs.name,
                 description: "Structures imported via web tool",
                 uuid: manifestUUID,
                 version: [1, 0, 0]
@@ -637,22 +821,26 @@
         const zip = new JSZip();
         const worldZip = await zip.loadAsync(worldZipBlob);
         const behaviorPacksFolder = worldZip.folder('behavior_packs');
-        // 解压行为包并放入 behavior_packs/imported_structures_pack/
+
+        // 解压行为包并放入指定文件夹
         const packZip = new JSZip();
         const unpacked = await packZip.loadAsync(behaviorPackBlob);
-        const targetFolder = behaviorPacksFolder.folder('imported_structures_pack');
+        const targetFolder = behaviorPacksFolder.folder(CONFIG.packs.folder);
         for (const [path, file] of Object.entries(unpacked.files)) {
             if (file.dir) continue;
             const data = await file.async('uint8array');
             targetFolder.file(path, data);
         }
+
         // 更新 world_behavior_packs.json
         let behaviorPacks = [];
         if (worldZip.files['world_behavior_packs.json']) {
             const content = await worldZip.files['world_behavior_packs.json'].async('string');
-            try { behaviorPacks = JSON.parse(content); } catch(e) { behaviorPacks = []; }
+            try { behaviorPacks = JSON.parse(content); }
+            catch(e) { behaviorPacks = []; }
             if (!Array.isArray(behaviorPacks)) behaviorPacks = [];
         }
+
         const exists = behaviorPacks.some(p => p.pack_id === packUUID);
         if (!exists) {
             behaviorPacks.push({
@@ -665,38 +853,60 @@
     }
 
     injectBtn.addEventListener('click', async () => {
+        if (isProcessing) return; // Prevent concurrent operations
+
         if (!injectWorldFile || injectStructureFiles.length === 0) {
-            injectStatusDiv.innerHTML = i18n.injectNoWorld || 'Please select both world and structure files.';
+            clearStatus(injectStatusDiv);
             injectStatusDiv.className = 'status error';
+            appendStatusMessage(injectStatusDiv, i18n.injectNoWorld, 'error');
             return;
         }
+        isProcessing = true;
         injectBtn.disabled = true;
-        injectStatusDiv.innerHTML = i18n.injectProcessing + '<br>';
+        clearStatus(injectStatusDiv);
+        const statusMessages = [];
         injectStatusDiv.className = 'status info';
+
         try {
-            injectStatusDiv.innerHTML += i18n.injectUnzipWorld + '<br>';
+            statusMessages.push(i18n.injectProcessing);
+            statusMessages.push(i18n.injectUnzipWorld);
+            updateStatusDisplay(injectStatusDiv, statusMessages);
+
             const flattenedWorld = await flattenZip(injectWorldFile);
-            injectStatusDiv.innerHTML += i18n.injectCreatePack + '<br>';
+
+            statusMessages.push(i18n.injectCreatePack);
+            updateStatusDisplay(injectStatusDiv, statusMessages);
+
             const behaviorPackBlob = await createBehaviorPack(injectStructureFiles);
-            const packUUID = 'imported_structures_pack';
-            injectStatusDiv.innerHTML += i18n.injectAddStructures + '<br>';
+            const packUUID = CONFIG.packs.folder;
+
+            statusMessages.push(i18n.injectAddStructures);
+            updateStatusDisplay(injectStatusDiv, statusMessages);
+
             const newWorldBlob = await addBehaviorPackToWorld(flattenedWorld, behaviorPackBlob, packUUID);
             const url = URL.createObjectURL(newWorldBlob);
+
+            // Auto-download
             const autoLink = document.createElement('a');
             autoLink.href = url;
             autoLink.download = 'world_with_structures.mcworld';
             document.body.appendChild(autoLink);
             autoLink.click();
             document.body.removeChild(autoLink);
-            setTimeout(() => URL.revokeObjectURL(url), 10000);
-            injectStatusDiv.innerHTML += `<br>${i18n.injectSuccess.replace('{count}', injectStructureFiles.length)}`;
+
+            // Schedule URL cleanup
+            scheduleUrlRevoke(url);
+
+            statusMessages.push(i18n.injectSuccess.replace('{count}', injectStructureFiles.length));
+            updateStatusDisplay(injectStatusDiv, statusMessages);
             injectStatusDiv.className = 'status success';
         } catch (err) {
-            console.error(err);
-            injectStatusDiv.innerHTML += `<br>${i18n.statusError.replace('{message}', err.message)}`;
+            statusMessages.push(i18n.statusError.replace('{message}', escapeHtml(err.message)));
+            updateStatusDisplay(injectStatusDiv, statusMessages);
             injectStatusDiv.className = 'status error';
         } finally {
             injectBtn.disabled = false;
+            isProcessing = false;
         }
     });
 
