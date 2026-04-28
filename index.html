@@ -814,7 +814,7 @@
             const data = await file.arrayBuffer();
             structuresFolder.file(name, new Uint8Array(data));
         }
-        return await packZip.generateAsync({ type: "blob" });
+        return await packZip.generateAsync({ type: "blob", compression: "DEFLATE" });
     }
 
     async function addBehaviorPackToWorld(worldZipBlob, behaviorPackBlob, packUUID) {
@@ -849,7 +849,7 @@
             });
         }
         worldZip.file('world_behavior_packs.json', JSON.stringify(behaviorPacks, null, 2));
-        return await worldZip.generateAsync({ type: "blob" });
+        return await worldZip.generateAsync({ type: "blob", compression: "DEFLATE" });
     }
 
     injectBtn.addEventListener('click', async () => {
